@@ -45,15 +45,15 @@ class CircleEstimator {
   void setInitialGuess(float r_, float u_, float v_,
                        const std::vector<float>& thetas_) {
     r = std::log(r_);
-    u = u_;
-    v = v_;
+    u = std::log(u_);
+    v = std::log(v_);
     thetas = thetas_;
   }
 
   std::vector<cv::Point2f> estimatedPoints() const {
     std::vector<cv::Point2f> points;
     for (const auto& theta : thetas) {
-      points.push_back(model(std::exp(r), u, v, theta));
+      points.push_back(model(std::exp(r), std::exp(u), std::exp(v), theta));
     }
     return points;
   }
@@ -63,26 +63,11 @@ class CircleEstimator {
   cv::Point2f residual() const {
     cv::Point2f e;
     for (size_t i = 0; i < N; i++) {
-      const auto sub = observedPoints[i] - model(std::exp(r), u, v, thetas[i]);
+      const auto sub = observedPoints[i] - model(std::exp(r), std::exp(u), std::exp(v), thetas[i]);
       e.x += sub.x * sub.x;
       e.y += sub.y * sub.y;
     }
     return e;
-  }
-
-  void gaussianNewton(size_t iter) {
-    for (size_t i = 0; i < iter; i++) {
-      const auto J = jac();
-      const auto H = J.t() * J;
-      const auto res = residual();
-      cv::Mat e = cv::Mat::zeros(2, 1, CV_32F);
-      e.at<float>(cv::Point(0, 0)) = res.x;
-      e.at<float>(cv::Point(0, 1)) = res.y;
-      cv::Mat a = -J.t() * e;
-      cv::Mat dx = H.inv() * a;
-      update(dx);
-      showParameters();
-    }
   }
 
   void LM(size_t iter, float lambda_ = 1e-10) {
@@ -100,7 +85,6 @@ class CircleEstimator {
       float beforeEnergy = energy();
       update(dx);
       float afterEnergy = energy();
-      std::cout << "Lambda = " << lambda << std::endl;
       if (afterEnergy < beforeEnergy) {
         lambda *= 0.1;
         showParameters();
@@ -113,11 +97,14 @@ class CircleEstimator {
   }
 
   void update(const cv::Mat& dx) {
-    r += dx.at<float>(cv::Point(0, 0));
-    u += dx.at<float>(cv::Point(1, 0));
-    v += dx.at<float>(cv::Point(2, 0));
-    for (size_t j = 0; j < N; j++) {
-      thetas[j] += dx.at<float>(cv::Point(3 + j, 0));
+    dr = dx.at<float>(cv::Point(0, 0));
+    du = dx.at<float>(cv::Point(1, 0));
+    dv = dx.at<float>(cv::Point(2, 0));
+    r += dr;
+    u += du;
+    v += dv;
+    for (size_t i = 0; i < N; i++) {
+      thetas[i] += dx.at<float>(cv::Point(3 + i, 0));
     }
   }
 
@@ -127,6 +114,9 @@ class CircleEstimator {
     std::cout << "R = " << R << std::endl;
     std::cout << "u = " << U << std::endl;
     std::cout << "v = " << V << std::endl;
+    std::cout << "dr = " << dr << std::endl;
+    std::cout << "du = " << du << std::endl;
+    std::cout << "dv = " << dv << std::endl;
     std::cout << "E = " << energy() << std::endl;
   }
 
@@ -134,15 +124,15 @@ class CircleEstimator {
     cv::Mat J = cv::Mat::zeros(2, N + 3, CV_32F);
     for (size_t i = 0; i < N; i++) {
       const auto sub_u =
-          observedPoints[i].x - (std::exp(r) * std::cos(thetas[i]) + u);
+          observedPoints[i].x - (std::exp(r) * std::cos(thetas[i]) + std::exp(u));
       const auto sub_v =
-          observedPoints[i].y - (std::exp(r) * std::sin(thetas[i]) + v);
+          observedPoints[i].y - (std::exp(r) * std::sin(thetas[i]) + std::exp(v));
       J.at<float>(cv::Point(0, 0)) +=
           -std::exp(r) * std::cos(thetas[i]) * sub_u;
       J.at<float>(cv::Point(0, 1)) +=
           -std::exp(r) * std::sin(thetas[i]) * sub_v;
-      J.at<float>(cv::Point(1, 0)) += -sub_u;
-      J.at<float>(cv::Point(2, 1)) += -sub_v;
+      J.at<float>(cv::Point(1, 0)) += - std::exp(u)* sub_u;
+      J.at<float>(cv::Point(2, 1)) += -std::exp(v)* sub_v;
       J.at<float>(cv::Point(3 + i, 0)) =
           std::exp(r) * std::sin(thetas[i]) * sub_u;
       J.at<float>(cv::Point(3 + i, 1)) =
@@ -152,7 +142,7 @@ class CircleEstimator {
   }
 
   std::tuple<float, float, float> getParams() const {
-    return {std::exp(r), u, v};
+    return {std::exp(r), std::exp(u), std::exp(v)};
   }
 
  private:
@@ -163,31 +153,41 @@ class CircleEstimator {
   float r;
   float u;
   float v;
+
+  float dr, du, dv;
 };
 
 int main(int argc, char** argv) {
-  float n = 1000;
+  float n = 300;
   float r = 300;
   float u = 512;
   float v = 512;
 
   cv::Mat img = cv::Mat::zeros(cv::Size(u * 2, v * 2), CV_8UC3);
-  cv::circle(img, cv::Point(u, v), r, cv::Scalar(255, 255, 255));
+  std::random_device seed_gen;
+  std::default_random_engine engine(seed_gen());
+  std::normal_distribution dist(0.0F, 0.2F);
 
   const auto [gtPoints, gtThetas] = generateData(n, r, u, v);
+  std::vector<cv::Point2f> observedPoints;
+  std::vector<float> observedThetas;
 
-  for (const auto& p : gtPoints) {
-    auto& v = img.at<cv::Vec3b>(p);
+  for (size_t i = 0; i< gtPoints.size(); i++) {
+    const auto noisyP = gtPoints[i]+ noise(10);
+    const auto noisyTheta = gtThetas[i] + dist(engine);
+    observedPoints.push_back(noisyP);
+    observedThetas.push_back(noisyTheta);
+    auto& v = img.at<cv::Vec3b>(noisyP);
     v[1] = 255;
   }
 
   CircleEstimator ce(gtPoints);
-  auto initR = r + 30;
-  auto initU = u + 10;
-  auto initV = v -10;
-  ce.setInitialGuess(initR, initU, initV, gtThetas);
+  auto initR = r + 100;
+  auto initU = u + 40;
+  auto initV = v -50;
+  ce.setInitialGuess(initR, initU, initV, observedThetas);
   ce.showParameters();
-  ce.LM(10);
+  ce.LM(30);
 
   const auto [R, U, V] = ce.getParams();
 
@@ -200,6 +200,11 @@ int main(int argc, char** argv) {
   //   v[1] = 255;
   //   v[2] = 255;
   // }
+
+  for (const auto& p : gtPoints) {
+    auto& v = img.at<cv::Vec3b>(p);
+    //v[1] = 255;
+  }
 
   cv::imwrite("result.png", img);
 
